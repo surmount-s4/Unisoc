@@ -7,8 +7,8 @@ param(
     [int]$InitialDaysBack = 0,
     [string]$RabbitMQHost = "localhost",
     [int]$RabbitMQPort = 5672,
-    [string]$RabbitMQUser = "guest",
-    [string]$RabbitMQPassword = "guest",
+    [string]$RabbitMQUser = "admin",
+    [string]$RabbitMQPassword = "admin",
     [string]$RabbitMQQueue = "security_events",
     [string]$RabbitMQVHost = "/",
     [string[]]$LogSources = @(

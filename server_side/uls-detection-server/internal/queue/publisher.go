@@ -102,13 +102,10 @@ func (p *Publisher) connect() error {
 }
 
 func (p *Publisher) handleReconnect() {
-	for {
-		select {
-		case err := <-p.notifyClose:
-			if err != nil {
-				log.Printf("Publisher connection lost: %v, reconnecting...", err)
-				p.reconnect()
-			}
+	for err := range p.notifyClose {
+		if err != nil {
+			log.Printf("Publisher connection lost: %v, reconnecting...", err)
+			p.reconnect()
 		}
 	}
 }

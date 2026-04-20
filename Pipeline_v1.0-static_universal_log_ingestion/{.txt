@@ -1,0 +1,20 @@
+{
+  "reasoning": "A large number of registry modifications were performed in privilege escalation sensitive areas within a short time frame, indicating possible unauthorized activity. Additionally, suspicious API calls, special privileges assignment, explicit credential usage, potential token manipulation, obfuscated file creation, and system/browser information discovery were detected.",
+  "ioc": [
+    "Multiple registry modifications in privilege escalation sensitive areas",
+    "Suspicious API call trace",
+    "Special privileges assigned to user logon",
+    "Explicit credential usage detected",
+    "Potential token manipulation detected",
+    "Potentially obfuscated files created",
+    "SeDebugPrivilege granted - potential LSASS access",
+    "System information discovery detected",
+    "Browser information discovery detected"
+  ],
+  "ioa": [
+    "Persistence (registry modifications, special privileges assignment)",
+    "Privilege escalation (special privileges assignment, SeDebugPrivilege granted)",
+    "Lateral movement (potential token manipulation, system/browser information discovery)",
+    "Defense evasion (obfuscated files, explicit credential usage)"
+  ]
+}

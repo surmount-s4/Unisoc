@@ -62,6 +62,84 @@ services:
           cpus: '0.5'
           memory: 256M
 
+  uls-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    container_name: uls-server
+    restart: unless-stopped
+    environment:
+      POSTGRES_HOST: timescaledb
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-admin}
+      POSTGRES_PASS: ${POSTGRES_PASSWORD:-admin}
+      POSTGRES_DB: uls_detection
+
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: ${RABBITMQ_USER:-admin}
+      RABBITMQ_PASS: ${RABBITMQ_PASSWORD:-admin}
+      RABBITMQ_QUEUE: ${RABBITMQ_QUEUE:-security_events}
+      RABBITMQ_FW_QUEUE: ${RABBITMQ_FW_QUEUE:-firewall_events}
+      RABBITMQ_SCADA_QUEUE: ${RABBITMQ_SCADA_QUEUE:-scada_logs}
+
+      BATCH_SIZE: ${BATCH_SIZE:-100}
+      BATCH_DELAY_MS: ${BATCH_DELAY_MS:-1000}
+
+      # Ingest-first compose defaults: keep core ingestion always on.
+      OLLAMA_URL: ${OLLAMA_URL:-}
+      CORRELATION_ENGINE_V2_ENABLED: ${CORRELATION_ENGINE_V2_ENABLED:-false}
+      SCADA_HTTP_PORT: ${SCADA_HTTP_PORT:-5001}
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    ports:
+      - "5001:5001"
+    networks:
+      - uls-network
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+  syslog-receiver:
+    build:
+      context: .
+      dockerfile: Dockerfile.syslog-receiver
+    container_name: uls-syslog-receiver
+    restart: unless-stopped
+    command:
+      - --host=0.0.0.0
+      - --port=5514
+      - --rmq-host=rabbitmq
+      - --rmq-port=5672
+      - --rmq-user=${RABBITMQ_USER:-admin}
+      - --rmq-pass=${RABBITMQ_PASSWORD:-admin}
+      - --rmq-queue=${RABBITMQ_FW_QUEUE:-firewall_events}
+      - --batch-size=${SYSLOG_BATCH_SIZE:-50}
+      - --flush-sec=${SYSLOG_FLUSH_SEC:-2}
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    ports:
+      - "5514:5514/udp"
+    networks:
+      - uls-network
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+
 volumes:
   timescaledb_data:
     driver: local

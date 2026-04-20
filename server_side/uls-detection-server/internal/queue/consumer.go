@@ -112,13 +112,10 @@ func (c *Consumer) connect() error {
 }
 
 func (c *Consumer) handleReconnect() {
-	for {
-		select {
-		case err := <-c.notifyClose:
-			if err != nil {
-				log.Printf("Consumer connection lost: %v, reconnecting...", err)
-				c.reconnect()
-			}
+	for err := range c.notifyClose {
+		if err != nil {
+			log.Printf("Consumer connection lost: %v, reconnecting...", err)
+			c.reconnect()
 		}
 	}
 }

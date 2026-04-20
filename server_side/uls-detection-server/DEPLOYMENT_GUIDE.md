@@ -1,5 +1,55 @@
 # ULS Detection Server - Deployment Guide
 
+## Automated Fresh Ubuntu Setup (Recommended)
+
+For a fresh Ubuntu VM, use the bootstrap script below instead of the manual legacy flow.
+
+```bash
+cd /opt/uls-detection-server
+
+# Ensure the script is executable (safe to run multiple times)
+chmod +x init-scripts/bootstrap-ubuntu.sh
+
+# Full stack bootstrap: Docker + TimescaleDB + RabbitMQ + ULS services + schema
+sudo bash init-scripts/bootstrap-ubuntu.sh
+```
+
+What this script automates:
+- Installs Docker Engine and Docker Compose plugin (Ubuntu)
+- Creates `.env` from `.env.example` on first run
+- Generates non-default PostgreSQL/RabbitMQ passwords on first run
+- Starts containers using `docker compose`
+- Applies schema via `init-scripts/setup-postgres-linux.sh`
+- Verifies core database tables
+
+Optional flags:
+
+```bash
+# Skip Docker installation if already installed
+sudo bash init-scripts/bootstrap-ubuntu.sh --skip-prereqs
+
+# Bring up only infrastructure (TimescaleDB + RabbitMQ)
+sudo bash init-scripts/bootstrap-ubuntu.sh --infra-only
+
+# Start stack without rebuilding images
+sudo bash init-scripts/bootstrap-ubuntu.sh --no-build
+```
+
+Quick post-bootstrap checks:
+
+```bash
+docker ps
+docker exec uls-timescaledb psql -U admin -d uls_detection -c "\\dt"
+docker exec uls-rabbitmq rabbitmqctl list_queues name messages consumers
+```
+
+Queue mapping in the current stack:
+- `security_events` for Windows agent events
+- `firewall_events` for firewall/syslog events
+- `scada_logs` for SCADA events
+
+---
+
 ## Quick Reference: When to Deploy
 
 ### Phase 1: Infrastructure Setup (Do First on Server)
