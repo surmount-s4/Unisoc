@@ -357,6 +357,7 @@ CREATE TABLE IF NOT EXISTS llm_pass_1 (
     llm_is_ioa BOOLEAN,
     llm_is_ioc BOOLEAN,
     llm_ioc_values TEXT,
+    llm_ioa_values TEXT,
     llm_mitre_technique TEXT,
     llm_confidence FLOAT,
     llm_model TEXT,
@@ -367,6 +368,9 @@ CREATE TABLE IF NOT EXISTS llm_pass_1 (
     final_summary TEXT NOT NULL,
     final_mitre TEXT
 );
+
+ALTER TABLE llm_pass_1
+ADD COLUMN IF NOT EXISTS llm_ioa_values TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_llm_created_at ON llm_pass_1(created_at);
 CREATE INDEX IF NOT EXISTS idx_llm_src_ip ON llm_pass_1(src_ip);

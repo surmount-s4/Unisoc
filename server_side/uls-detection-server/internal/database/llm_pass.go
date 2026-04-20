@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS llm_pass_1 (
     llm_is_ioa          BOOLEAN,
     llm_is_ioc          BOOLEAN,
     llm_ioc_values      TEXT,
+	llm_ioa_values      TEXT,
     llm_mitre_technique TEXT,
     llm_confidence      FLOAT,
     llm_model           TEXT,
@@ -51,6 +52,9 @@ CREATE TABLE IF NOT EXISTS llm_pass_1 (
     final_summary   TEXT NOT NULL,
     final_mitre     TEXT
 );
+
+ALTER TABLE llm_pass_1
+ADD COLUMN IF NOT EXISTS llm_ioa_values TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_llm_created_at  ON llm_pass_1(created_at);
 CREATE INDEX IF NOT EXISTS idx_llm_src_ip      ON llm_pass_1(src_ip);
@@ -78,7 +82,7 @@ func InsertLLMPassEvents(ctx context.Context, db *DB, events []models.LLMPassEve
 		"agent_host", "src_ip", "dst_ip", "dst_port", "event_id",
 		"raw_summary", "rule_severity", "rule_mitre", "rule_is_ioa",
 		"llm_severity", "llm_short_summary", "llm_is_ioa", "llm_is_ioc",
-		"llm_ioc_values", "llm_mitre_technique", "llm_confidence",
+		"llm_ioc_values", "llm_ioa_values", "llm_mitre_technique", "llm_confidence",
 		"llm_model", "llm_latency_ms", "llm_enabled",
 		"final_severity", "final_summary", "final_mitre",
 	}
@@ -99,7 +103,7 @@ func InsertLLMPassEvents(ctx context.Context, db *DB, events []models.LLMPassEve
 			e.AgentHost, e.SrcIP, e.DstIP, e.DstPort, e.EventID,
 			e.RawSummary, e.RuleSeverity, e.RuleMitre, e.RuleIsIOA,
 			nullStr(e.LLMSeverity), nullStr(e.LLMSummary), e.LLMIsIOA, e.LLMIsIOC,
-			nullStr(e.LLMIOCValues), nullStr(e.LLMMitre), nullFloat(e.LLMConfidence),
+			nullStr(e.LLMIOCValues), nullStr(e.LLMIOAValues), nullStr(e.LLMMitre), nullFloat(e.LLMConfidence),
 			nullStr(e.LLMModel), nullInt(e.LLMLatencyMs), e.LLMEnabled,
 			e.FinalSeverity, e.FinalSummary, nullStr(e.FinalMitre),
 		)

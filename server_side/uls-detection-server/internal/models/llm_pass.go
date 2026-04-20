@@ -19,39 +19,29 @@ type LLMInput struct {
 	SrcIP           string `json:"src_ip,omitempty"`
 	DstIP           string `json:"dst_ip,omitempty"`
 	DstPort         string `json:"dst_port,omitempty"`
-	ProcessName     string `json:"process_name,omitempty"`  // image_2 for windows
-	CommandLine     string `json:"command_line,omitempty"`  // commandline_2 truncated to 300 chars
-	Action          string `json:"action,omitempty"`        // firewall Allow/Deny
-	SentBytes       string `json:"sent_bytes,omitempty"`    // firewall transfer volume
-	Timestamp       string `json:"timestamp"`               // ISO8601
-	FingerprintHash string `json:"-"`                       // pre-computed SHA-256, not sent to LLM
+	ProcessName     string `json:"process_name,omitempty"` // image_2 for windows
+	CommandLine     string `json:"command_line,omitempty"` // commandline_2 truncated to 300 chars
+	Action          string `json:"action,omitempty"`       // firewall Allow/Deny
+	SentBytes       string `json:"sent_bytes,omitempty"`   // firewall transfer volume
+	Timestamp       string `json:"timestamp"`              // ISO8601
+	FingerprintHash string `json:"-"`                      // pre-computed SHA-256, not sent to LLM
 }
 
 // ---------------------------------------------------------------------------
-// LLMOutput — structured JSON the LLM is asked to return.
+// LLMOutput — structured JSON the LLM is asked to return per 5-second window.
 // ---------------------------------------------------------------------------
 
-// LLMOutput is the JSON object expected back from the LLM per batch.
+// LLMOutput is the JSON object expected back from the LLM using forensic prompt.
 type LLMOutput struct {
-	// Per-event results keyed by position index in the batch.
-	Results []LLMEventResult `json:"results"`
-	// Model metadata
-	Model      string  `json:"model,omitempty"`
-	LatencyMs  int64   `json:"latency_ms,omitempty"`
-	TokensUsed int     `json:"tokens_used,omitempty"`
-}
+	Verdict   string   `json:"verdict"`   // Info | Warning | Critical
+	Reasoning string   `json:"reasoning"` // concise forensic explanation
+	IOC       []string `json:"ioc"`       // IoC list from model output
+	IOA       []string `json:"ioa"`       // IoA list from model output
 
-// LLMEventResult holds the LLM's assessment of a single event.
-type LLMEventResult struct {
-	Index          int      `json:"index"`
-	Severity       string   `json:"severity"`        // INFO | LOW | MEDIUM | HIGH | CRITICAL
-	IsIOA          bool     `json:"is_ioa"`
-	IsIOC          bool     `json:"is_ioc"`
-	IOCValues      []string `json:"ioc_values"`      // extracted artifact strings
-	ShortSummary   string   `json:"short_summary"`   // ≤80 char natural-language description
-	MitreTechnique string   `json:"mitre_technique"` // may refine the rule-based mapping
-	Confidence     float64  `json:"confidence"`      // 0.0–1.0
-	Error          string   `json:"error,omitempty"` // per-event parse error
+	// Model metadata
+	Model      string `json:"model,omitempty"`
+	LatencyMs  int64  `json:"latency_ms,omitempty"`
+	TokensUsed int    `json:"tokens_used,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -74,22 +64,23 @@ type LLMPassEvent struct {
 	EventID   string `json:"event_id"`
 
 	// Rule-based fields (always populated)
-	RawSummary      string `json:"raw_summary"`      // EventDetails from detector
-	RuleSeverity    string `json:"rule_severity"`
-	RuleMitre       string `json:"rule_mitre"`
-	RuleIsIOA       bool   `json:"rule_is_ioa"`
+	RawSummary   string `json:"raw_summary"` // EventDetails from detector
+	RuleSeverity string `json:"rule_severity"`
+	RuleMitre    string `json:"rule_mitre"`
+	RuleIsIOA    bool   `json:"rule_is_ioa"`
 
 	// LLM-enriched fields (null/zero if LLM disabled or circuit open)
-	LLMSeverity    string  `json:"llm_severity"`
-	LLMSummary     string  `json:"llm_short_summary"`
-	LLMIsIOA       bool    `json:"llm_is_ioa"`
-	LLMIsIOC       bool    `json:"llm_is_ioc"`
-	LLMIOCValues   string  `json:"llm_ioc_values"`  // comma-separated
-	LLMMitre       string  `json:"llm_mitre_technique"`
-	LLMConfidence  float64 `json:"llm_confidence"`
-	LLMModel       string  `json:"llm_model"`
-	LLMLatencyMs   int64   `json:"llm_latency_ms"`
-	LLMEnabled     bool    `json:"llm_enabled"` // false = passthrough mode
+	LLMSeverity   string  `json:"llm_severity"`
+	LLMSummary    string  `json:"llm_short_summary"`
+	LLMIsIOA      bool    `json:"llm_is_ioa"`
+	LLMIsIOC      bool    `json:"llm_is_ioc"`
+	LLMIOCValues  string  `json:"llm_ioc_values"` // comma-separated
+	LLMIOAValues  string  `json:"llm_ioa_values"` // comma-separated
+	LLMMitre      string  `json:"llm_mitre_technique"`
+	LLMConfidence float64 `json:"llm_confidence"`
+	LLMModel      string  `json:"llm_model"`
+	LLMLatencyMs  int64   `json:"llm_latency_ms"`
+	LLMEnabled    bool    `json:"llm_enabled"` // false = passthrough mode
 
 	// Final resolved fields: LLM output preferred, rule-based fallback
 	FinalSeverity string `json:"final_severity"`

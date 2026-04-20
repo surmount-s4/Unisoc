@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -21,10 +22,10 @@ import (
 // ---------------------------------------------------------------------------
 
 type ollamaRequest struct {
-	Model  string `json:"model"`
-	Prompt string `json:"prompt"`
-	Stream bool   `json:"stream"`
-	Format string `json:"format"` // "json"
+	Model   string        `json:"model"`
+	Prompt  string        `json:"prompt"`
+	Stream  bool          `json:"stream"`
+	Format  string        `json:"format"` // "json"
 	Options ollamaOptions `json:"options"`
 }
 
@@ -44,7 +45,7 @@ type ollamaResponse struct {
 
 type circuitBreaker struct {
 	failures    atomic.Int32
-	openUntil   atomic.Int64  // Unix nano; 0 = closed
+	openUntil   atomic.Int64 // Unix nano; 0 = closed
 	threshold   int32
 	openSeconds int64
 }
@@ -115,17 +116,17 @@ func (c *OllamaClient) IsAvailable() bool {
 	return !c.circuit.IsOpen()
 }
 
-// Analyze sends a batch of LLMInput events to Ollama and returns structured results.
+// Analyze sends one window batch of LLMInput events to Ollama and returns forensic JSON output.
 // On failure it records the failure in the circuit breaker and returns an error.
-func (c *OllamaClient) Analyze(ctx context.Context, inputs []models.LLMInput) (models.LLMOutput, error) {
+func (c *OllamaClient) Analyze(ctx context.Context, inputs []models.LLMInput, windowSeconds int) (models.LLMOutput, error) {
 	if c.circuit.IsOpen() {
 		return models.LLMOutput{}, fmt.Errorf("circuit open: Ollama unavailable")
 	}
 	if len(inputs) == 0 {
-		return models.LLMOutput{Results: []models.LLMEventResult{}}, nil
+		return models.LLMOutput{IOC: []string{}, IOA: []string{}}, nil
 	}
 
-	prompt := BuildWindowPrompt(inputs)
+	prompt := BuildWindowPrompt(inputs, windowSeconds)
 
 	reqBody, _ := json.Marshal(ollamaRequest{
 		Model:  c.model,
@@ -176,31 +177,55 @@ func (c *OllamaClient) Analyze(ctx context.Context, inputs []models.LLMInput) (m
 
 	var out models.LLMOutput
 	if err := json.Unmarshal([]byte(ollamaResp.Response), &out); err != nil {
-		// LLM returned unparseable JSON — record failure but don't open circuit
-		// (model may have produced partial output under load)
-		c.circuit.RecordFailure()
-		return models.LLMOutput{}, fmt.Errorf("parse llm json: %w — raw: %.200s", err, ollamaResp.Response)
+		clean, ok := extractJSONObject(ollamaResp.Response)
+		if !ok {
+			// LLM returned unparseable JSON — record failure but don't open circuit
+			// (model may have produced partial output under load)
+			c.circuit.RecordFailure()
+			return models.LLMOutput{}, fmt.Errorf("parse llm json: %w — raw: %.200s", err, ollamaResp.Response)
+		}
+		if err := json.Unmarshal([]byte(clean), &out); err != nil {
+			c.circuit.RecordFailure()
+			return models.LLMOutput{}, fmt.Errorf("parse extracted llm json: %w — raw: %.200s", err, ollamaResp.Response)
+		}
+	}
+
+	out.Verdict = normalizeVerdict(out.Verdict)
+	if out.Reasoning == "" {
+		out.Reasoning = "No malicious activity detected."
+	}
+	if out.IOC == nil {
+		out.IOC = []string{}
+	}
+	if out.IOA == nil {
+		out.IOA = []string{}
 	}
 
 	latency := time.Since(start).Milliseconds()
 	out.Model = c.model
 	out.LatencyMs = latency
 	c.circuit.RecordSuccess()
-
-	// Ensure result slice length matches input
-	padLLMResults(&out, len(inputs))
 	return out, nil
 }
 
-// padLLMResults fills in missing result entries if the LLM returns fewer than expected.
-func padLLMResults(out *models.LLMOutput, expected int) {
-	got := len(out.Results)
-	for i := got; i < expected; i++ {
-		out.Results = append(out.Results, models.LLMEventResult{
-			Index:      i,
-			Severity:   "",
-			Confidence: 0,
-			Error:      "missing from LLM response",
-		})
+func extractJSONObject(s string) (string, bool) {
+	start := strings.Index(s, "{")
+	end := strings.LastIndex(s, "}")
+	if start == -1 || end == -1 || end <= start {
+		return "", false
+	}
+	return s[start : end+1], true
+}
+
+func normalizeVerdict(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "critical":
+		return "Critical"
+	case "warning":
+		return "Warning"
+	case "info":
+		return "Info"
+	default:
+		return "Info"
 	}
 }

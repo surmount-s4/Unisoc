@@ -189,6 +189,14 @@ Execution model:
 - Falls back to passthrough output when LLM is disabled/unavailable
 - Writes unified rows into `llm_pass_1`
 
+Persisted forensic fields in `llm_pass_1`:
+- `llm_severity`: normalized severity from forensic verdict (`Info|Warning|Critical`)
+- `llm_short_summary`: forensic reasoning text
+- `llm_is_ioc`: boolean flag when IoCs are present
+- `llm_ioc_values`: comma-separated IoC list
+- `llm_is_ioa`: boolean flag when IoAs are present
+- `llm_ioa_values`: comma-separated IoA list
+
 Important behavior guarantees:
 - Ingestion path is never blocked by LLM path.
 - If output channel is full, watcher drops that window and records dropped metric.

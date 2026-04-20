@@ -7,44 +7,33 @@ import (
 	"uls-detection-server/internal/models"
 )
 
-// ---------------------------------------------------------------------------
-// Prompt construction for LLM security event analysis
-// ---------------------------------------------------------------------------
+// BuildWindowPrompt constructs the forensic prompt for one 5-second window.
+func BuildWindowPrompt(inputs []models.LLMInput, windowSeconds int) string {
+	if windowSeconds <= 0 {
+		windowSeconds = 5
+	}
 
-const systemInstruction = `You are a security analyst AI. Analyse security events and return a JSON object.
-Return ONLY valid JSON. No markdown, no explanation, no code blocks.
-The JSON must have this exact structure:
+	prompt := fmt.Sprintf(`You are a digital forensic analyst. Analyze the following system logs collected over a %d-second window.
+
+Instructions:
+1. If malicious activity is detected:
+   - Provide the forensic evidence and cause.
+   - Extract Indicators of Compromise (IoCs): IPs, domains, file paths, hashes, registry keys, etc.
+   - Extract Indicators of Attack (IoAs): persistence, privilege escalation, lateral movement, defense evasion, etc.
+2. If benign, respond strictly with: "No malicious activity detected."
+3. Always respond in JSON with this exact schema:
+
 {
-  "results": [
-    {
-      "index": 0,
-      "severity": "HIGH",
-      "is_ioa": true,
-      "is_ioc": false,
-      "ioc_values": [],
-      "short_summary": "One sentence, max 80 chars, describing what happened",
-      "mitre_technique": "T1059.001",
-      "confidence": 0.92
-    }
-  ]
+  "verdict": "Info | Warning | Critical",
+  "reasoning": "Concise forensic explanation (if malicious, else 'No malicious activity detected.')",
+  "ioc": ["list of IoCs if any, else []"],
+  "ioa": ["list of IoAs if any, else []"]
 }
+`, windowSeconds)
 
-Severity must be one of: INFO, LOW, MEDIUM, HIGH, CRITICAL
-is_ioa = true if the event matches a behavioural attack pattern (tool-agnostic)
-is_ioc = true if a concrete artifact (IP, hash, domain, path) indicates compromise
-ioc_values = extracted artifact strings (empty array if none)
-mitre_technique = ATT&CK technique ID(s), comma-separated; use the rule hint if correct
-confidence = how confident you are, 0.0-1.0
-`
-
-// BuildWindowPrompt constructs a single prompt for a batch of events from one window.
-// Events are rendered as a compact numbered table to minimise token usage.
-func BuildWindowPrompt(inputs []models.LLMInput) string {
 	var sb strings.Builder
-
-	sb.WriteString(systemInstruction)
-	sb.WriteString("\n\nAnalyse the following ")
-	sb.WriteString(fmt.Sprintf("%d security event(s):\n\n", len(inputs)))
+	sb.WriteString(prompt)
+	sb.WriteString("\nSystem logs:\n\n")
 
 	for i, ev := range inputs {
 		sb.WriteString(fmt.Sprintf("[%d] source=%s host=%q event_id=%q rule_severity=%s mitre=%q module=%q\n",
@@ -53,7 +42,7 @@ func BuildWindowPrompt(inputs []models.LLMInput) string {
 		sb.WriteString(fmt.Sprintf("    rule_detail=%q\n", ev.EventDetails))
 
 		if ev.SrcIP != "" || ev.DstIP != "" {
-			sb.WriteString(fmt.Sprintf("    network: %s → %s:%s\n", ev.SrcIP, ev.DstIP, ev.DstPort))
+			sb.WriteString(fmt.Sprintf("    network: %s -> %s:%s\n", ev.SrcIP, ev.DstIP, ev.DstPort))
 		}
 		if ev.ProcessName != "" {
 			sb.WriteString(fmt.Sprintf("    process: %q\n", ev.ProcessName))
@@ -61,7 +50,7 @@ func BuildWindowPrompt(inputs []models.LLMInput) string {
 		if ev.CommandLine != "" {
 			line := ev.CommandLine
 			if len(line) > 300 {
-				line = line[:300] + "…"
+				line = line[:300] + "..."
 			}
 			sb.WriteString(fmt.Sprintf("    cmdline: %q\n", line))
 		}
@@ -71,41 +60,59 @@ func BuildWindowPrompt(inputs []models.LLMInput) string {
 		sb.WriteString("\n")
 	}
 
-	sb.WriteString("Return results array with one entry per event (index 0 to ")
-	sb.WriteString(fmt.Sprintf("%d).\n", len(inputs)-1))
-
 	return sb.String()
-}
-
-// passthroughResult builds an LLMEventResult from rule-based fields when LLM is disabled.
-func passthroughResult(i int, input models.LLMInput) models.LLMEventResult {
-	return models.LLMEventResult{
-		Index:          i,
-		Severity:       input.RuleSeverity,
-		IsIOA:          input.MitreTechnique != "",
-		IsIOC:          false,
-		IOCValues:      []string{},
-		ShortSummary:   truncate(input.EventDetails, 80),
-		MitreTechnique: input.MitreTechnique,
-		Confidence:     0.8, // rule-based rules are high-precision; use 0.8 as canonical fallback
-	}
 }
 
 func truncate(s string, max int) string {
 	if len(s) <= max {
 		return s
 	}
-	return s[:max-1] + "…"
+	return s[:max-1] + "..."
 }
 
-// mergePassthrough converts a []LLMInput to a passthrough LLMOutput without any LLM call.
+// mergePassthrough converts a []LLMInput to a window-level forensic output when LLM is disabled.
 func mergePassthrough(inputs []models.LLMInput) models.LLMOutput {
-	results := make([]models.LLMEventResult, len(inputs))
-	for i, inp := range inputs {
-		results[i] = passthroughResult(i, inp)
+	verdict := "Info"
+	reasoning := "No malicious activity detected."
+	ioc := make([]string, 0, 8)
+	ioa := make([]string, 0, 8)
+
+	for _, inp := range inputs {
+		sevVerdict := severityToVerdict(inp.RuleSeverity)
+		if verdictRank(sevVerdict) > verdictRank(verdict) {
+			verdict = sevVerdict
+		}
+
+		if strings.TrimSpace(inp.EventDetails) != "" && reasoning == "No malicious activity detected." {
+			reasoning = truncate(strings.TrimSpace(inp.EventDetails), 300)
+		}
+
+		if inp.SrcIP != "" {
+			ioc = append(ioc, inp.SrcIP)
+		}
+		if inp.DstIP != "" {
+			ioc = append(ioc, inp.DstIP)
+		}
+		if inp.DstPort != "" {
+			ioc = append(ioc, "port:"+inp.DstPort)
+		}
+		if inp.MitreTechnique != "" {
+			ioa = append(ioa, "mitre:"+inp.MitreTechnique)
+		}
 	}
+
+	ioc = uniqueStrings(ioc)
+	ioa = uniqueStrings(ioa)
+
+	if verdict == "Info" && len(ioc) == 0 && len(ioa) == 0 {
+		reasoning = "No malicious activity detected."
+	}
+
 	return models.LLMOutput{
-		Results:   results,
+		Verdict:   verdict,
+		Reasoning: reasoning,
+		IOC:       ioc,
+		IOA:       ioa,
 		Model:     "passthrough",
 		LatencyMs: 0,
 	}
@@ -116,3 +123,69 @@ func iocValuesToString(vals []string) string {
 	return strings.Join(vals, ",")
 }
 
+// ioaValuesToString joins a slice of IOA values to a comma-separated string.
+func ioaValuesToString(vals []string) string {
+	return strings.Join(vals, ",")
+}
+
+func verdictToSeverity(verdict string) string {
+	switch strings.ToLower(strings.TrimSpace(verdict)) {
+	case "critical":
+		return "CRITICAL"
+	case "warning":
+		return "MEDIUM"
+	case "info":
+		return "INFO"
+	default:
+		return ""
+	}
+}
+
+func confidenceFromVerdict(verdict string) float64 {
+	switch strings.ToLower(strings.TrimSpace(verdict)) {
+	case "critical":
+		return 0.90
+	case "warning":
+		return 0.70
+	case "info":
+		return 0.40
+	default:
+		return 0
+	}
+}
+
+func severityToVerdict(sev string) string {
+	switch strings.ToUpper(strings.TrimSpace(sev)) {
+	case "CRITICAL", "HIGH":
+		return "Critical"
+	case "MEDIUM", "LOW":
+		return "Warning"
+	default:
+		return "Info"
+	}
+}
+
+func verdictRank(verdict string) int {
+	switch strings.ToLower(strings.TrimSpace(verdict)) {
+	case "critical":
+		return 3
+	case "warning":
+		return 2
+	default:
+		return 1
+	}
+}
+
+func uniqueStrings(in []string) []string {
+	seen := make(map[string]bool, len(in))
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		s = strings.TrimSpace(s)
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
+}

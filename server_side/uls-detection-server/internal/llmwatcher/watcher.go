@@ -180,7 +180,7 @@ func (w *Watcher) processWindow(ctx context.Context, windowEnd time.Time) {
 			if len(winInputs) == 0 {
 				return
 			}
-			out, err := w.ollama.Analyze(ctx, winInputs)
+			out, err := w.ollama.Analyze(ctx, winInputs, w.cfg.WindowSeconds)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -198,7 +198,7 @@ func (w *Watcher) processWindow(ctx context.Context, windowEnd time.Time) {
 			if len(fwInputs) == 0 {
 				return
 			}
-			out, err := w.ollama.Analyze(ctx, fwInputs)
+			out, err := w.ollama.Analyze(ctx, fwInputs, w.cfg.WindowSeconds)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -383,34 +383,42 @@ func (w *Watcher) fetchFirewallEvents(ctx context.Context, from, to time.Time) (
 
 func (w *Watcher) buildPassRows(windowTS time.Time, inputs []models.LLMInput, out models.LLMOutput, sourceType string, llmEnabled bool) []models.LLMPassEvent {
 	rows := make([]models.LLMPassEvent, 0, len(inputs))
-	for i, inp := range inputs {
+	llmSeverity := verdictToSeverity(out.Verdict)
+	llmConfidence := confidenceFromVerdict(out.Verdict)
+	llmSummary := strings.TrimSpace(out.Reasoning)
+	if len(out.IOA) > 0 {
+		if llmSummary == "" {
+			llmSummary = "No malicious activity detected."
+		}
+		llmSummary = llmSummary + " | IOA: " + strings.Join(out.IOA, "; ")
+	}
+
+	for _, inp := range inputs {
 		row := models.LLMPassEvent{
-			SourceType:      sourceType,
-			WindowTS:        windowTS,
-			AgentHost:       inp.AgentHost,
-			SrcIP:           inp.SrcIP,
-			DstIP:           inp.DstIP,
-			DstPort:         inp.DstPort,
-			EventID:         inp.EventID,
-			RawSummary:      inp.EventDetails,
-			RuleSeverity:    inp.RuleSeverity,
-			RuleMitre:       inp.MitreTechnique,
-			RuleIsIOA:       inp.MitreTechnique != "",
-			LLMEnabled:      llmEnabled,
+			SourceType:   sourceType,
+			WindowTS:     windowTS,
+			AgentHost:    inp.AgentHost,
+			SrcIP:        inp.SrcIP,
+			DstIP:        inp.DstIP,
+			DstPort:      inp.DstPort,
+			EventID:      inp.EventID,
+			RawSummary:   inp.EventDetails,
+			RuleSeverity: inp.RuleSeverity,
+			RuleMitre:    inp.MitreTechnique,
+			RuleIsIOA:    inp.MitreTechnique != "",
+			LLMEnabled:   llmEnabled,
 		}
 
-		if i < len(out.Results) {
-			r := out.Results[i]
-			row.LLMSeverity = r.Severity
-			row.LLMSummary = r.ShortSummary
-			row.LLMIsIOA = r.IsIOA
-			row.LLMIsIOC = r.IsIOC
-			row.LLMIOCValues = iocValuesToString(r.IOCValues)
-			row.LLMMitre = r.MitreTechnique
-			row.LLMConfidence = r.Confidence
-			row.LLMModel = out.Model
-			row.LLMLatencyMs = out.LatencyMs
-		}
+		row.LLMSeverity = llmSeverity
+		row.LLMSummary = llmSummary
+		row.LLMIsIOA = len(out.IOA) > 0
+		row.LLMIsIOC = len(out.IOC) > 0
+		row.LLMIOCValues = iocValuesToString(out.IOC)
+		row.LLMIOAValues = ioaValuesToString(out.IOA)
+		row.LLMMitre = ""
+		row.LLMConfidence = llmConfidence
+		row.LLMModel = out.Model
+		row.LLMLatencyMs = out.LatencyMs
 
 		// Final resolved: prefer LLM output, fall back to rule-based
 		row.FinalSeverity = coalesce(row.LLMSeverity, row.RuleSeverity)
