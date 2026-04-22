@@ -1,0 +1,267 @@
+## DoS Attack Scenario - Load Impact Analysis
+
+Let me analyze what happens to your correlation engine when a **DoS (Denial of Service) attack** generates massive log volumes:
+
+---
+
+### 🚨 **Critical Failure Points During DoS**
+
+#### **1. CSV Data Explosion**
+```
+Normal Load: 250 events/min × 100 endpoints = 25,000 events/min
+DoS Attack:  10,000 events/min × 100 endpoints = 1,000,000 events/min
+
+CSV File Growth:
+- Normal: ~20 MB/hour
+- DoS: ~800 MB/hour to 2+ GB/hour
+```
+
+**Impact on your code:**
+- `load_and_filter_csv()` will load **entire CSV into memory** (pandas DataFrame)
+- 2 GB CSV = ~4-8 GB RAM usage after DataFrame overhead
+- **System crashes** when CSV > available RAM
+
+---
+
+#### **2. Process Chain Hash Table Overflow**
+
+From your `extract_process_chains()` method:
+
+```python
+hash_table_creation = {}  # Stores ALL process relationships
+hash_table_source_target = {}  # Stores ALL network connections
+```
+
+**During DoS:**
+- Each event creates hash table entries
+- DoS events (EventID 3 - Network) create **source-target pairs**
+- Network scan DoS: 1000s of unique target IPs
+- **Hash table grows to 100K-1M+ entries**
+
+**Memory consumption:**
+```
+Normal: ~5,000 processes × 2 KB = 10 MB
+DoS: ~500,000 processes × 2 KB = 1 GB (hash table alone!)
+```
+
+---
+
+#### **3. Time Window Catastrophe**
+
+Your `_create_time_windows()` with 5-second windows:
+
+```python
+WINDOW_SECONDS = 5  # 5-second windows
+
+# During DoS attack:
+Events per 5-sec window: 1,000,000 events/min ÷ 12 = 83,333 events/window
+```
+
+**What happens:**
+1. **Each window** contains 50K-100K events
+2. **LLM inference** for 100K events = **massive prompt** (>500 KB text)
+3. **Ollama timeout** (120 seconds) will **definitely trigger**
+4. **Queue backlog** grows exponentially
+
+**Result:** 
+- Windows pile up faster than LLM can process
+- System enters **infinite backlog mode**
+
+---
+
+#### **4. LLM Prompt Size Explosion**
+
+From `_query_llm_for_window()`:
+
+```python
+prompt = f"""
+...
+Logs to analyze:
+{json.dumps(logs, indent=2, cls=DateTimeEncoder)}
+"""
+```
+
+**During DoS:**
+```
+Normal window: 10-50 events × 500 bytes = 5-25 KB prompt
+DoS window: 83,333 events × 500 bytes = 41 MB prompt (!!)
+```
+
+**LLM failures:**
+- Ollama/Mistral context limit: ~128K tokens (≈500 KB text)
+- Your DoS prompt: **41 MB >> 500 KB**
+- **LLM refuses request** or **crashes**
+- Even if accepted: inference time = 5-10 minutes (far beyond 120s timeout)
+
+---
+
+#### **5. Database Implications** 
+
+While not in this code, if you're storing results:
+
+```python
+# Each window creates database entries
+critical_events.append({...})  # Stored in list
+
+# During DoS:
+12 windows/min × 60 min = 720 windows
+Each with 83K events = 60 million event records
+```
+
+**Database impact:**
+- Writes fail due to timeout
+- Transaction logs explode
+- Disk I/O saturates at 100%
+
+---
+
+### ⚠️ **Cascading Failure Chain**
+
+```mermaid
+DoS Attack (1M events/min)
+    ↓
+CSV grows to 2+ GB
+    ↓
+pandas load fails OR system OOM
+    ↓
+Hash tables consume 1+ GB RAM
+    ↓
+Windows with 83K events each
+    ↓
+LLM prompts exceed context limit
+    ↓
+Ollama timeouts on every request
+    ↓
+Queue backlog grows infinitely
+    ↓
+SYSTEM DEADLOCK
+```
+
+---
+
+### 🛡️ **Specific Vulnerabilities in Your Code**
+
+#### **Line 92-95: Unbounded DataFrame Load**
+```python
+def load_and_filter_csv(self) -> pd.DataFrame:
+    df = pd.read_csv(self.csv_file_path)  # ❌ Loads entire file
+    # No size check, no chunking, no streaming
+```
+
+#### **Line 147-180: Hash Table Growth**
+```python
+for _, row in self.raw_df.iterrows():  # ❌ Iterates ALL rows
+    hash_table_creation[process_guid] = [...]  # ❌ No size limit
+    hash_table_source_target[source_guid] = [...]  # ❌ Unbounded
+```
+
+#### **Line 347-380: Window Aggregation**
+```python
+for window_start, window_events in windows.items():
+    if len(window_events) >= 1:  # ❌ No upper limit!
+        logs_for_llm = []
+        for _, event in window_events.iterrows():  # ❌ Could be 100K iterations
+            logs_for_llm.append(log_entry)
+```
+
+#### **Line 485-500: LLM Prompt Construction**
+```python
+prompt = f"""
+...
+{json.dumps(logs, indent=2, cls=DateTimeEncoder)}  # ❌ Could be 41 MB!
+"""
+```
+
+---
+
+### 📊 **Real-World DoS Scenario**
+
+**Attack Type:** SYN Flood DoS
+```
+Target: Web server
+Attack rate: 100,000 packets/second
+Log generation: EventID 3 (Network Connection)
+
+Per-endpoint impact:
+- 100K events/sec × 60 sec = 6 million events/min
+- CSV growth: 6 MB/min = 360 MB/hour
+- Hash table: 6M entries × 2 KB = 12 GB RAM
+```
+
+**Your pipeline behavior:**
+1. **T+0 min:** DoS starts, CSV begins growing
+2. **T+5 min:** First window processes → LLM timeout (too many events)
+3. **T+10 min:** CSV reaches 60 MB, DataFrame load slows
+4. **T+15 min:** Hash table hits 3 GB RAM, system swaps
+5. **T+20 min:** LLM queue backlog = 200+ windows
+6. **T+30 min:** System crashes (OOM) or hangs indefinitely
+
+---
+
+### 💡 **Why Current Architecture Fails**
+
+1. **No Event Rate Limiting**
+   - Accepts unlimited events per window
+   - No throttling or sampling
+
+2. **No Memory Protection**
+   - CSV loads entirely into RAM
+   - Hash tables grow unbounded
+   - No garbage collection triggers
+
+3. **No LLM Batch Size Control**
+   - Sends all window events to LLM
+   - No chunking or summarization
+   - No prompt size validation
+
+4. **Sequential Processing**
+   - One window at a time
+   - Can't parallelize to catch up
+   - Backlog accumulates linearly
+
+5. **No Attack Detection**
+   - Doesn't distinguish DoS from normal activity
+   - Treats 100K events same as 10 events
+   - No adaptive behavior
+
+---
+
+### 🔧 **Required Mitigations** (We can implement these)
+
+#### **Immediate Fixes:**
+
+1. **Event Sampling** (above threshold)
+2. **Window Event Cap** (max 1000 events/window)
+3. **CSV Chunking** (stream, don't load all)
+4. **Memory Monitors** (kill if > 80% RAM)
+5. **LLM Prompt Size Validation** (reject if > 100 KB)
+
+#### **Architecture Changes:**
+
+1. **Pre-filtering** (drop obvious DoS noise)
+2. **Event Deduplication** (hash-based)
+3. **Tiered Processing** (fast path for anomalies)
+4. **Rate Limiting** (per-endpoint quotas)
+5. **Circuit Breaker** (auto-disable during floods)
+
+---
+
+### 🎯 **Practical Impact**
+
+**Current max capacity:**
+- **~50-100 endpoints** at normal activity
+- **~5-10 endpoints** during DoS attack
+- **1 endpoint** during severe DoS (100K events/sec)
+
+**With DoS protection:**
+- **~500 endpoints** at normal activity  
+- **~100 endpoints** during DoS attack
+- **Graceful degradation** instead of crash
+
+---
+
+Would you like me to:
+1. **Implement DoS protection mechanisms** (sampling, caps, circuit breakers)?
+2. **Add memory monitors and auto-kill switches**?
+3. **Create a DoS load testing script** to validate these scenarios?
+4. **Design a tiered processing system** (fast/slow paths)?
