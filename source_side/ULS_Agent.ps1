@@ -5,12 +5,14 @@
 # Parameters:
 param(
     [int]$InitialDaysBack = 0,
-    [string]$RabbitMQHost = "localhost",
+    [string]$RabbitMQHost = "192.168.0.215",
     [int]$RabbitMQPort = 5672,
     [string]$RabbitMQUser = "admin",
     [string]$RabbitMQPassword = "admin",
     [string]$RabbitMQQueue = "security_events",
     [string]$RabbitMQVHost = "/",
+    [int]$RabbitMQHttpPort = 15672,
+    [string]$RabbitMQClientDllPath = "",
     [string[]]$LogSources = @(
         'Microsoft-Windows-Sysmon/Operational',
         'Security',
@@ -27,6 +29,54 @@ if ($Verbose) {
     $VerbosePreference = 'Continue'
 }
 
+# Allow central deployment configuration via environment variables when
+# explicit script parameters are not supplied.
+if (-not $PSBoundParameters.ContainsKey('RabbitMQHost') -and $env:RABBITMQ_HOST) {
+    $RabbitMQHost = $env:RABBITMQ_HOST
+}
+
+if (-not $PSBoundParameters.ContainsKey('RabbitMQPort') -and $env:RABBITMQ_PORT) {
+    $parsedPort = 0
+    if ([int]::TryParse($env:RABBITMQ_PORT, [ref]$parsedPort)) {
+        $RabbitMQPort = $parsedPort
+    } else {
+        Write-Warning "Invalid RABBITMQ_PORT '$($env:RABBITMQ_PORT)'; keeping $RabbitMQPort"
+    }
+}
+
+if (-not $PSBoundParameters.ContainsKey('RabbitMQUser') -and $env:RABBITMQ_USER) {
+    $RabbitMQUser = $env:RABBITMQ_USER
+}
+
+if (-not $PSBoundParameters.ContainsKey('RabbitMQPassword')) {
+    if ($env:RABBITMQ_PASS) {
+        $RabbitMQPassword = $env:RABBITMQ_PASS
+    } elseif ($env:RABBITMQ_PASSWORD) {
+        $RabbitMQPassword = $env:RABBITMQ_PASSWORD
+    }
+}
+
+if (-not $PSBoundParameters.ContainsKey('RabbitMQQueue') -and $env:RABBITMQ_QUEUE) {
+    $RabbitMQQueue = $env:RABBITMQ_QUEUE
+}
+
+if (-not $PSBoundParameters.ContainsKey('RabbitMQVHost') -and $env:RABBITMQ_VHOST) {
+    $RabbitMQVHost = $env:RABBITMQ_VHOST
+}
+
+if (-not $PSBoundParameters.ContainsKey('RabbitMQHttpPort') -and $env:RABBITMQ_HTTP_PORT) {
+    $parsedHttpPort = 0
+    if ([int]::TryParse($env:RABBITMQ_HTTP_PORT, [ref]$parsedHttpPort)) {
+        $RabbitMQHttpPort = $parsedHttpPort
+    } else {
+        Write-Warning "Invalid RABBITMQ_HTTP_PORT '$($env:RABBITMQ_HTTP_PORT)'; keeping $RabbitMQHttpPort"
+    }
+}
+
+if ([string]::IsNullOrWhiteSpace($RabbitMQHost) -or [string]::IsNullOrWhiteSpace($RabbitMQQueue)) {
+    throw "RabbitMQHost and RabbitMQQueue must be set."
+}
+
 # Get computer name for event tagging
 $ComputerName = $env:COMPUTERNAME
 
@@ -34,8 +84,13 @@ Write-Host "ULS Agent Starting..."
 Write-Host "Collecting events every $IntervalSeconds seconds"
 Write-Host "Target log sources: $($LogSources -join ', ')"
 Write-Host "RabbitMQ: $RabbitMQHost`:$RabbitMQPort"
+Write-Host "RabbitMQ vhost: $RabbitMQVHost"
 Write-Host "Queue: $RabbitMQQueue"
 Write-Host "Press Ctrl+C to stop`n"
+
+if ($RabbitMQPassword -eq "admin") {
+    Write-Warning "RabbitMQ password is still the default 'admin'. Set RABBITMQ_PASS/RABBITMQ_PASSWORD or pass -RabbitMQPassword."
+}
 
 # Initialize timestamp tracking
 $lastTimestamp = if ($InitialDaysBack -gt 0) {
@@ -51,20 +106,40 @@ Write-Host "Starting from timestamp: $lastTimestamp"
 # ============================================================================
 
 # Load RabbitMQ.Client assembly if available, otherwise use HTTP API
-$useHttpApi = $false
-try {
-    Add-Type -Path "C:\Program Files\RabbitMQ\client\RabbitMQ.Client.dll" -ErrorAction Stop
-    Write-Host "Using RabbitMQ .NET Client"
-} catch {
+$script:useHttpApi = $false
+$rabbitClientLoaded = $false
+$dllCandidates = @(
+    $RabbitMQClientDllPath,
+    (Join-Path -Path $PSScriptRoot -ChildPath "RabbitMQ.Client.dll"),
+    "C:\Program Files\RabbitMQ\client\RabbitMQ.Client.dll",
+    "C:\Program Files (x86)\RabbitMQ\client\RabbitMQ.Client.dll"
+) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
+
+foreach ($dllPath in $dllCandidates) {
+    if (-not (Test-Path -Path $dllPath)) {
+        continue
+    }
+
+    try {
+        Add-Type -Path $dllPath -ErrorAction Stop
+        $rabbitClientLoaded = $true
+        Write-Host "Using RabbitMQ .NET Client from: $dllPath"
+        break
+    } catch {
+        Write-Warning "Failed to load RabbitMQ client library '$dllPath': $_"
+    }
+}
+
+if (-not $rabbitClientLoaded) {
     Write-Host "RabbitMQ .NET Client not found, using HTTP API"
-    $useHttpApi = $true
+    $script:useHttpApi = $true
 }
 
 # HTTP API fallback function
 function Send-ToRabbitMQHttp {
     param(
         [string]$Host,
-        [int]$Port,
+        [int]$ManagementPort,
         [string]$User,
         [string]$Password,
         [string]$VHost,
@@ -72,9 +147,8 @@ function Send-ToRabbitMQHttp {
         [string]$Message
     )
     
-    $httpPort = 15672  # RabbitMQ Management HTTP API port
-    $encodedVHost = [System.Web.HttpUtility]::UrlEncode($VHost)
-    $uri = "http://$Host`:$httpPort/api/exchanges/$encodedVHost/amq.default/publish"
+    $encodedVHost = [System.Uri]::EscapeDataString($VHost)
+    $uri = "http://$Host`:$ManagementPort/api/exchanges/$encodedVHost/amq.default/publish"
     
     $body = @{
         properties = @{}
@@ -91,6 +165,10 @@ function Send-ToRabbitMQHttp {
     
     try {
         $response = Invoke-RestMethod -Uri $uri -Method Post -Headers $headers -Body $body -ErrorAction Stop
+        if ($null -ne $response.routed -and -not $response.routed) {
+            Write-Warning "RabbitMQ HTTP publish request accepted but not routed (queue: $Queue, vhost: $VHost)"
+            return $false
+        }
         return $true
     } catch {
         Write-Warning "Failed to send to RabbitMQ HTTP API: $_"
@@ -102,7 +180,7 @@ function Send-ToRabbitMQHttp {
 $rabbitConnection = $null
 $rabbitChannel = $null
 
-if (-not $useHttpApi) {
+if (-not $script:useHttpApi) {
     try {
         $factory = New-Object RabbitMQ.Client.ConnectionFactory
         $factory.HostName = $RabbitMQHost
@@ -120,7 +198,7 @@ if (-not $useHttpApi) {
         Write-Host "Connected to RabbitMQ via AMQP"
     } catch {
         Write-Warning "Failed to connect via AMQP, falling back to HTTP API: $_"
-        $useHttpApi = $true
+        $script:useHttpApi = $true
     }
 }
 
@@ -131,7 +209,7 @@ function Send-EventsToRabbitMQ {
     
     $jsonPayload = $Events | ConvertTo-Json -Depth 10 -Compress
     
-    if (-not $useHttpApi -and $rabbitChannel -ne $null) {
+    if (-not $script:useHttpApi -and $rabbitChannel -ne $null) {
         try {
             $body = [System.Text.Encoding]::UTF8.GetBytes($jsonPayload)
             $properties = $rabbitChannel.CreateBasicProperties()
@@ -142,21 +220,30 @@ function Send-EventsToRabbitMQ {
             return $true
         } catch {
             Write-Warning "AMQP publish failed: $_"
-            return $false
+            Write-Warning "Switching to HTTP API fallback on port $RabbitMQHttpPort"
+            $script:useHttpApi = $true
         }
-    } else {
-        return Send-ToRabbitMQHttp -Host $RabbitMQHost -Port $RabbitMQPort -User $RabbitMQUser `
-            -Password $RabbitMQPassword -VHost $RabbitMQVHost -Queue $RabbitMQQueue -Message $jsonPayload
     }
+
+    return Send-ToRabbitMQHttp -Host $RabbitMQHost -ManagementPort $RabbitMQHttpPort -User $RabbitMQUser `
+        -Password $RabbitMQPassword -VHost $RabbitMQVHost -Queue $RabbitMQQueue -Message $jsonPayload
 }
 
 function Save-ToFallback {
     param([array]$Events)
     
     $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-    $fallbackFile = $FallbackPath -replace "\.json$", "_$timestamp.json"
+    $fallbackFile = if ($FallbackPath -match "\.json$") {
+        $FallbackPath -replace "\.json$", "_$timestamp.json"
+    } else {
+        "${FallbackPath}_$timestamp.json"
+    }
+    $fallbackDir = Split-Path -Path $fallbackFile -Parent
     
     try {
+        if ($fallbackDir -and -not (Test-Path -Path $fallbackDir)) {
+            New-Item -Path $fallbackDir -ItemType Directory -Force | Out-Null
+        }
         $Events | ConvertTo-Json -Depth 10 | Out-File -FilePath $fallbackFile -Encoding UTF8
         Write-Warning "Events saved to fallback file: $fallbackFile"
         return $true
