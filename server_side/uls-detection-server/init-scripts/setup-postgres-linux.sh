@@ -129,7 +129,7 @@ main() {
   app_pass_literal="$(escape_sql_literal "$APP_PASSWORD")"
 
   log "Ensuring application role exists: $APP_USER"
-  psql_query "$ADMIN_DB" "DO \\$\\$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '$app_user_literal') THEN ALTER ROLE \"$APP_USER\" WITH LOGIN PASSWORD '$app_pass_literal'; ELSE CREATE ROLE \"$APP_USER\" WITH LOGIN PASSWORD '$app_pass_literal'; END IF; END \\$\\$;"
+  psql_query "$ADMIN_DB" "DO \$\$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '$app_user_literal') THEN ALTER ROLE \"$APP_USER\" WITH LOGIN PASSWORD '$app_pass_literal'; ELSE CREATE ROLE \"$APP_USER\" WITH LOGIN PASSWORD '$app_pass_literal'; END IF; END \$\$;"
 
   log "Ensuring database exists: $APP_DB"
   local exists
