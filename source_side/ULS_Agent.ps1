@@ -107,6 +107,8 @@ Write-Host "Starting from timestamp: $lastTimestamp"
 
 # Load RabbitMQ.Client assembly if available, otherwise use HTTP API
 $script:useHttpApi = $false
+$script:LastHttpStatusCode = 0
+$script:LastHttpErrorBody = $null
 $rabbitClientLoaded = $false
 $dllCandidates = @(
     $RabbitMQClientDllPath,
@@ -138,7 +140,7 @@ if (-not $rabbitClientLoaded) {
 # HTTP API fallback function
 function Send-ToRabbitMQHttp {
     param(
-        [string]$Host,
+        [string]$RabbitHost,
         [int]$ManagementPort,
         [string]$User,
         [string]$Password,
@@ -148,7 +150,7 @@ function Send-ToRabbitMQHttp {
     )
     
     $encodedVHost = [System.Uri]::EscapeDataString($VHost)
-    $uri = "http://$Host`:$ManagementPort/api/exchanges/$encodedVHost/amq.default/publish"
+    $uri = "http://$RabbitHost`:$ManagementPort/api/exchanges/$encodedVHost/amq.default/publish"
     
     $body = @{
         properties = @{}
@@ -165,13 +167,36 @@ function Send-ToRabbitMQHttp {
     
     try {
         $response = Invoke-RestMethod -Uri $uri -Method Post -Headers $headers -Body $body -ErrorAction Stop
+        $script:LastHttpStatusCode = 200
+        $script:LastHttpErrorBody = $null
         if ($null -ne $response.routed -and -not $response.routed) {
             Write-Warning "RabbitMQ HTTP publish request accepted but not routed (queue: $Queue, vhost: $VHost)"
             return $false
         }
         return $true
     } catch {
-        Write-Warning "Failed to send to RabbitMQ HTTP API: $_"
+        $script:LastHttpStatusCode = 0
+        $script:LastHttpErrorBody = $null
+
+        if ($_.Exception.Response) {
+            try {
+                $script:LastHttpStatusCode = [int]$_.Exception.Response.StatusCode
+            } catch {}
+            try {
+                $stream = $_.Exception.Response.GetResponseStream()
+                if ($stream) {
+                    $reader = New-Object System.IO.StreamReader($stream)
+                    $script:LastHttpErrorBody = $reader.ReadToEnd()
+                    $reader.Close()
+                }
+            } catch {}
+        }
+
+        if ($script:LastHttpErrorBody) {
+            Write-Warning "Failed to send to RabbitMQ HTTP API (status: $script:LastHttpStatusCode): $script:LastHttpErrorBody"
+        } else {
+            Write-Warning "Failed to send to RabbitMQ HTTP API (status: $script:LastHttpStatusCode): $_"
+        }
         return $false
     }
 }
@@ -225,8 +250,24 @@ function Send-EventsToRabbitMQ {
         }
     }
 
-    return Send-ToRabbitMQHttp -Host $RabbitMQHost -ManagementPort $RabbitMQHttpPort -User $RabbitMQUser `
+    $httpOk = Send-ToRabbitMQHttp -RabbitHost $RabbitMQHost -ManagementPort $RabbitMQHttpPort -User $RabbitMQUser `
         -Password $RabbitMQPassword -VHost $RabbitMQVHost -Queue $RabbitMQQueue -Message $jsonPayload
+
+    # Recover from bad-request batches by splitting recursively; this avoids losing
+    # all events when a batch is too large or contains one problematic event.
+    if (-not $httpOk -and $script:LastHttpStatusCode -eq 400 -and $Events.Count -gt 1) {
+        $mid = [Math]::Floor($Events.Count / 2)
+        if ($mid -lt 1) {
+            return $false
+        }
+
+        Write-Warning "HTTP 400 for batch of $($Events.Count) events. Retrying as smaller batches ($mid + $($Events.Count - $mid))."
+        $leftOk = Send-EventsToRabbitMQ -Events $Events[0..($mid - 1)]
+        $rightOk = Send-EventsToRabbitMQ -Events $Events[$mid..($Events.Count - 1)]
+        return ($leftOk -and $rightOk)
+    }
+
+    return $httpOk
 }
 
 function Save-ToFallback {
